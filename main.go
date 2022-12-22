@@ -3,13 +3,14 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/grafov/bcast"
 	"math/rand"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/grafov/bcast"
 )
 
 var fileName string
@@ -18,88 +19,28 @@ func init() {
 	fileName = "matrix.txt"
 }
 
-func test() {
-	routinesCount := 2
-	n := 5
-	rows := make([][]int, routinesCount)
-	for i := 0; i < routinesCount; i++ {
-		rows[i] = getChunk(n, i, routinesCount)
-	}
-
-	messageBcast := bcast.NewGroup()
-	iBcast := bcast.NewGroup()
-	go messageBcast.Broadcast(0)
-	go iBcast.Broadcast(0)
-
-	var firstWg sync.WaitGroup
-	for k := 0; k < routinesCount; k++ { // Инициализация go-рутин
-		firstWg.Add(1)
-		go func(id int, rows []int) {
-			defer firstWg.Done()
-			memberRow := messageBcast.Join()
-			memberI := iBcast.Join()
-			row := 0
-			// var tmpRow []float64
-			for {
-				if row == len(rows) {
-					fmt.Printf("%d exited (%+v)\n", id, rows)
-					break
-				}
-				i := memberI.Recv().(int)
-				var tmpRow string
-
-				//fmt.Printf("routine #%d recieved i = %d\n", id, i)
-				if i == rows[row] {
-					//fmt.Printf("routine #%d sending row #%d\n", id, i)
-					tmpRow = fmt.Sprintf("row#%d from %d", i, id)
-					memberRow.Send(tmpRow)
-					//fmt.Printf("routine #%d end sending row #%d\n", id, i)
-					row++
-					fmt.Printf("%d row = %d\n\n", id, row)
-				} else {
-					fmt.Printf("recieve\n")
-					//fmt.Printf("routine #%d start wait row with id #%d\n", id, i)
-					tmpRow = memberRow.Recv().(string)
-					//fmt.Printf("routine #%d end wait row with id #%d\n", id, i)
-				}
-
-				for j := row; j < len(rows); j++ {
-					fmt.Printf("process '%s' in %d for row %d\n", tmpRow, id, rows[j])
-				}
-			}
-		}(k, rows[k])
-	}
-	for {
-		if iBcast.MemberCount() == routinesCount {
-			break
-		}
-	}
-
-	for i := 0; i < n-1; i++ {
-		iBcast.Send(i)
-	}
-	firstWg.Wait()
-}
-
 func main() {
-	routinesCount := 9
-	test()
-	return
-
-	generateMatrix(fileName, 20)
+	generateMatrix(fileName, 25)
 	matrix := loadData(fileName)
-	var beforeP = time.Now()
-	parallel(routinesCount, matrix)
-	var afterP = time.Now()
-	fmt.Printf("\nПараллельное выполнение: %s", afterP.Sub(beforeP).String())
-	fmt.Print("\n==================================================================================================\n\n")
-	matrix = loadData(fileName)
+
+	// fmt.Printf("%+v\n\n", matrix)
+
 	var beforeS = time.Now()
 	sequence(matrix)
 	var afterS = time.Now()
 	fmt.Printf("\n\nПоследовательное выполнение: %s", afterS.Sub(beforeS).String())
 	fmt.Print("\n==================================================================================================\n\n")
 
+	routinesCount := 2
+	matrix = loadData(fileName)
+
+	var beforeP = time.Now()
+	// doCalculate(false, matrix)
+	parallelV2(routinesCount, matrix)
+	// doCalculate(false, matrix)
+	var afterP = time.Now()
+	fmt.Printf("\nПараллельное выполнение: %s", afterP.Sub(beforeP).String())
+	fmt.Print("\n==================================================================================================\n\n")
 }
 
 func sequence(matrix [][]float64) {
@@ -121,7 +62,7 @@ func sequence(matrix [][]float64) {
 		for i := k + 1; i < n; i++ {
 			K := matrixClone[i][k] / matrixClone[k][k]
 			for j := 0; j < n+1; j++ {
-				matrixClone[i][j] = matrixClone[i][j] - matrixClone[k][j]*K
+				matrixClone[i][j] = matrixClone[i][j] - (matrixClone[k][j] * K)
 			}
 		}
 		for i := 0; i < n; i++ {
@@ -130,6 +71,7 @@ func sequence(matrix [][]float64) {
 			}
 		}
 	}
+	fmt.Printf("%+v\n", matrix)
 
 	// Обратный ход
 	for k := n - 1; k > -1; k-- {
@@ -143,11 +85,67 @@ func sequence(matrix [][]float64) {
 			}
 		}
 	}
-
 	for i := 0; i < n; i++ {
-		fmt.Printf("[%v] ", matrixClone[i][n])
+		// fmt.Printf("[%v] ", matrixClone[i][n])
 	}
 }
+
+func parallelV2(routinesCount int, matrix [][]float64) {
+	n := len(matrix)
+	matrixClone := make([][]float64, n)
+
+	for i := 0; i < n; i++ {
+		matrixClone[i] = make([]float64, n+1)
+		for j := 0; j < n+1; j++ {
+			matrixClone[i][j] = matrix[i][j]
+		}
+	}
+
+	rowsPerRoutine := make([][]int, routinesCount)
+	for i := 0; i < routinesCount; i++ {
+		rowsPerRoutine[i] = getChunk(n, i, routinesCount)
+	}
+
+	for matrixLine := 0; matrixLine < n; matrixLine++ {
+		for i := 0; i < n+1; i++ {
+			matrixClone[matrixLine][i] = matrixClone[matrixLine][i] / matrix[matrixLine][matrixLine]
+		}
+		var wg sync.WaitGroup
+		for routine := 0; routine < routinesCount; routine++ {
+			wg.Add(1)
+			go func(k int, rows []int) {
+				defer wg.Done()
+				for row := 0; row < len(rows); row++ {
+					i := rows[row] + 1
+					if i == n || i < k+1 {
+						continue
+					}
+					K := matrixClone[i][k] / matrixClone[k][k]
+					for j := 0; j < n+1; j++ {
+						matrixClone[i][j] = matrixClone[i][j] - (matrixClone[k][j] * K)
+					}
+				}
+				for row := 0; row < len(rows); row++ {
+					i := rows[row] + 1
+					if i == n {
+						break
+					}
+					for j := 0; j < n+1; j++ {
+						matrix[i][j] = matrixClone[i][j]
+					}
+				}
+			}(matrixLine, rowsPerRoutine[routine])
+		}
+		wg.Wait()
+		for i := 0; i < n+1; i++ {
+			matrix[matrixLine][i] = matrixClone[matrixLine][i]
+		}
+	}
+	fmt.Printf("%+v\n", matrix)
+
+}
+
+//====================================
 
 func parallel(routinesCount int, matrix [][]float64) {
 	n := len(matrix)
@@ -157,30 +155,76 @@ func parallel(routinesCount int, matrix [][]float64) {
 	for i := 0; i < routinesCount; i++ {
 		rows[i] = getChunk(n, i, routinesCount)
 	}
+	// messageBcast := bcast.NewGroup()
+	iBcast := bcast.NewGroup()
+	// go messageBcast.Broadcast(0)
+	go iBcast.Broadcast(0)
 
-	// Прямой ход
 	var firstWg sync.WaitGroup
-	for i := 0; i < routinesCount; i++ { // Инициализация go-рутин
+	for k := 0; k < routinesCount; k++ { // Инициализация go-рутин
 		firstWg.Add(1)
-		go func(rows []int) {
+		go func(id int, rows []int, matrixClone [][]float64) {
 			defer firstWg.Done()
+			// memberRow := messageBcast.Join()
+			memberI := iBcast.Join()
 			row := 0
-			// var tmpRow []float64
-			for i := 0; i < n-1; i++ {
-				if i == rows[row] {
-					//send row!
-					// tmpRow =
+			var tmpRow []float64
+			for {
+				i := memberI.Recv().(int)
+				// fmt.Printf("routine #%d recieved i = %d\n", id, i)
+				if row < len(rows) && i == rows[row] {
+					// fmt.Printf("routine #%d sending row #%d\n", id, i)
+					// tmpRow = fmt.Sprintf("row#%d from %d", i, id)
+					// memberRow.Send(tmpRow)
+					// fmt.Printf("routine #%d end sending row #%d\n", id, i)
 					row++
+					// fmt.Printf("%d row = %d\n\n", id, row)
 				} else {
-					// tmpRow =
+					// fmt.Printf("routine #%d start wait row with id #%d\n", id, i)
+					// tmpRow = memberRow.Recv().(string)
+					// fmt.Printf("routine #%d end wait row with id #%d\n", id, i)
 				}
-				// for j := 0; j < count; j++ {
-
-				// }
+				for i := 0; i < n+1; i++ {
+					matrixClone[k][i] = matrixClone[k][i] / matrix[k][k]
+				}
+				for i := k + 1; i < n; i++ {
+					K := matrixClone[i][k] / matrixClone[k][k]
+					fmt.Printf("THIS %v THIS (RIGHT)\n", K)
+					for j := 0; j < n+1; j++ {
+						matrixClone[i][j] = matrixClone[i][j] - (matrixClone[k][j] * K)
+					}
+				}
+				tmpRow = matrix[i]
+				for j := row; j < len(rows); j++ {
+					K := matrixClone[rows[j]][i] / tmpRow[i]
+					fmt.Printf("%d %d %v\n", rows[j], i, K)
+					for p := i; p < n+1; p++ {
+						matrixClone[p][rows[j]] = matrixClone[p][rows[j]] - (K * tmpRow[p])
+					}
+				}
+				for i := 0; i < n; i++ {
+					for j := 0; j < n+1; j++ {
+						matrix[i][j] = matrixClone[i][j]
+					}
+				}
+				if i == n-2 {
+					// fmt.Printf("%d exited (%+v)\n", id, rows)
+					break
+				}
 			}
-		}(rows[i])
+		}(k, rows[k], matrix)
+	}
+	for {
+		if iBcast.MemberCount() == routinesCount {
+			break
+		}
+	}
+
+	for i := 0; i < n-1; i++ {
+		iBcast.Send(i)
 	}
 	firstWg.Wait()
+	// fmt.Printf("%+v", matrix)
 
 	// Обратный ход (Зануление верхнего правого угла)
 	// for k := n - 1; k > -1; k-- {
