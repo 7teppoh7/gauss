@@ -9,38 +9,63 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/grafov/bcast"
 )
 
-var fileName string
+var (
+	fileName    string
+	matrixInRam [][]float64
+)
+
+const withAnswer = true
+const withDebug = true
+const useFsForMatrix = true
 
 func init() {
 	fileName = "matrix.txt"
 }
 
 func main() {
-	generateMatrix(fileName, 25)
-	matrix := loadData(fileName)
+	var matrix [][]float64
 
-	// fmt.Printf("%+v\n\n", matrix)
+	matrixSize := 3
+
+	if useFsForMatrix {
+		generateMatrix(fileName, matrixSize)
+		matrix = loadData(fileName)
+	} else {
+		generateMatrixInRAM(matrixSize)
+
+		matrix = make([][]float64, matrixSize)
+		for i := 0; i < matrixSize; i++ {
+			matrix[i] = make([]float64, matrixSize+1)
+			for j := 0; j < matrixSize+1; j++ {
+				matrix[i][j] = matrixInRam[i][j]
+			}
+		}
+	}
 
 	var beforeS = time.Now()
 	sequence(matrix)
 	var afterS = time.Now()
-	fmt.Printf("\n\nПоследовательное выполнение: %s", afterS.Sub(beforeS).String())
+	fmt.Printf("\n\nПоследовательное выполнение: %v (sec), %.5f (min)", afterS.Sub(beforeS).Seconds(), afterS.Sub(beforeS).Minutes())
 	fmt.Print("\n==================================================================================================\n\n")
+	timeSequence := afterS.Sub(beforeS).Seconds()
 
-	routinesCount := 2
-	matrix = loadData(fileName)
+	routinesCount := 16
+	if useFsForMatrix {
+		matrix = loadData(fileName)
+	} else {
+		matrix = matrixInRam
+	}
 
 	var beforeP = time.Now()
-	// doCalculate(false, matrix)
-	parallelV2(routinesCount, matrix)
-	// doCalculate(false, matrix)
+	parallel(routinesCount, matrix)
 	var afterP = time.Now()
-	fmt.Printf("\nПараллельное выполнение: %s", afterP.Sub(beforeP).String())
+	fmt.Printf("\nПараллельное выполнение: %v (sec), %.5f (min)", afterP.Sub(beforeP).Seconds(), afterP.Sub(beforeP).Minutes())
 	fmt.Print("\n==================================================================================================\n\n")
+	timeParallel := afterP.Sub(beforeP).Seconds()
+
+	fmt.Printf("Ускорение составило: %.4f", (timeSequence / timeParallel))
 }
 
 func sequence(matrix [][]float64) {
@@ -71,7 +96,6 @@ func sequence(matrix [][]float64) {
 			}
 		}
 	}
-	fmt.Printf("%+v\n", matrix)
 
 	// Обратный ход
 	for k := n - 1; k > -1; k-- {
@@ -85,12 +109,15 @@ func sequence(matrix [][]float64) {
 			}
 		}
 	}
-	for i := 0; i < n; i++ {
-		// fmt.Printf("[%v] ", matrixClone[i][n])
+
+	if withAnswer {
+		for i := 0; i < n; i++ {
+			fmt.Printf("[%v] ", matrixClone[i][n])
+		}
 	}
 }
 
-func parallelV2(routinesCount int, matrix [][]float64) {
+func parallel(routinesCount int, matrix [][]float64) {
 	n := len(matrix)
 	matrixClone := make([][]float64, n)
 
@@ -101,11 +128,13 @@ func parallelV2(routinesCount int, matrix [][]float64) {
 		}
 	}
 
+	// Распределение строк по go-рутинам
 	rowsPerRoutine := make([][]int, routinesCount)
 	for i := 0; i < routinesCount; i++ {
 		rowsPerRoutine[i] = getChunk(n, i, routinesCount)
 	}
 
+	// Прямой ход
 	for matrixLine := 0; matrixLine < n; matrixLine++ {
 		for i := 0; i < n+1; i++ {
 			matrixClone[matrixLine][i] = matrixClone[matrixLine][i] / matrix[matrixLine][matrixLine]
@@ -141,174 +170,26 @@ func parallelV2(routinesCount int, matrix [][]float64) {
 			matrix[matrixLine][i] = matrixClone[matrixLine][i]
 		}
 	}
-	fmt.Printf("%+v\n", matrix)
 
-}
-
-//====================================
-
-func parallel(routinesCount int, matrix [][]float64) {
-	n := len(matrix)
-
-	// Распределение строк по процессам
-	rows := make([][]int, routinesCount)
-	for i := 0; i < routinesCount; i++ {
-		rows[i] = getChunk(n, i, routinesCount)
-	}
-	// messageBcast := bcast.NewGroup()
-	iBcast := bcast.NewGroup()
-	// go messageBcast.Broadcast(0)
-	go iBcast.Broadcast(0)
-
-	var firstWg sync.WaitGroup
-	for k := 0; k < routinesCount; k++ { // Инициализация go-рутин
-		firstWg.Add(1)
-		go func(id int, rows []int, matrixClone [][]float64) {
-			defer firstWg.Done()
-			// memberRow := messageBcast.Join()
-			memberI := iBcast.Join()
-			row := 0
-			var tmpRow []float64
-			for {
-				i := memberI.Recv().(int)
-				// fmt.Printf("routine #%d recieved i = %d\n", id, i)
-				if row < len(rows) && i == rows[row] {
-					// fmt.Printf("routine #%d sending row #%d\n", id, i)
-					// tmpRow = fmt.Sprintf("row#%d from %d", i, id)
-					// memberRow.Send(tmpRow)
-					// fmt.Printf("routine #%d end sending row #%d\n", id, i)
-					row++
-					// fmt.Printf("%d row = %d\n\n", id, row)
-				} else {
-					// fmt.Printf("routine #%d start wait row with id #%d\n", id, i)
-					// tmpRow = memberRow.Recv().(string)
-					// fmt.Printf("routine #%d end wait row with id #%d\n", id, i)
-				}
-				for i := 0; i < n+1; i++ {
-					matrixClone[k][i] = matrixClone[k][i] / matrix[k][k]
-				}
-				for i := k + 1; i < n; i++ {
-					K := matrixClone[i][k] / matrixClone[k][k]
-					fmt.Printf("THIS %v THIS (RIGHT)\n", K)
-					for j := 0; j < n+1; j++ {
-						matrixClone[i][j] = matrixClone[i][j] - (matrixClone[k][j] * K)
-					}
-				}
-				tmpRow = matrix[i]
-				for j := row; j < len(rows); j++ {
-					K := matrixClone[rows[j]][i] / tmpRow[i]
-					fmt.Printf("%d %d %v\n", rows[j], i, K)
-					for p := i; p < n+1; p++ {
-						matrixClone[p][rows[j]] = matrixClone[p][rows[j]] - (K * tmpRow[p])
-					}
-				}
-				for i := 0; i < n; i++ {
-					for j := 0; j < n+1; j++ {
-						matrix[i][j] = matrixClone[i][j]
-					}
-				}
-				if i == n-2 {
-					// fmt.Printf("%d exited (%+v)\n", id, rows)
-					break
-				}
-			}
-		}(k, rows[k], matrix)
-	}
-	for {
-		if iBcast.MemberCount() == routinesCount {
-			break
+	// Обратный ход
+	for k := n - 1; k > -1; k-- {
+		for i := n; i > -1; i-- {
+			matrixClone[k][i] = matrixClone[k][i] / matrix[k][k]
 		}
-	}
-
-	for i := 0; i < n-1; i++ {
-		iBcast.Send(i)
-	}
-	firstWg.Wait()
-	// fmt.Printf("%+v", matrix)
-
-	// Обратный ход (Зануление верхнего правого угла)
-	// for k := n - 1; k > -1; k-- {
-	// 	for i := n; i > -1; i-- {
-	// 		matrixClone[k][i] = matrixClone[k][i] / matrix[k][k]
-	// 	}
-	// 	for i := k - 1; i > -1; i-- {
-	// 		K := matrixClone[i][k] / matrixClone[k][k]
-	// 		for j := n; j > -1; j-- {
-	// 			matrixClone[i][j] = matrixClone[i][j] - (matrixClone[k][j] * K)
-	// 		}
-	// 	}
-	// }
-
-	// for i := 0; i < n; i++ {
-	// 	fmt.Printf("[%v] ", matrixClone[i][n])
-	// }
-}
-
-func doCalculate(useParallel bool, matrix [][]float64) {
-
-	n := len(matrix)
-
-	var i, j, k int
-
-	var tmp float64
-	var xx = make([]float64, n)
-
-	for i = 0; i < n; i++ {
-		tmp = matrix[i][i]
-		for j = n; j >= i; j-- {
-			matrix[i][j] /= tmp
-		}
-
-		if useParallel {
-			var wg sync.WaitGroup
-
-			for j = i + 1; j < n; j++ {
-				wg.Add(1)
-				j := j
-				go func() {
-					defer wg.Done()
-					tmp = matrix[j][i]
-					for k = n; k >= i; k-- {
-						matrix[j][k] -= tmp * matrix[i][k]
-					}
-				}()
-			}
-			wg.Wait()
-		} else {
-			for j = i + 1; j < n; j++ {
-				tmp = matrix[j][i]
-				for k = n; k >= i; k-- {
-					matrix[j][k] -= tmp * matrix[i][k]
-				}
+		for i := k - 1; i > -1; i-- {
+			K := matrixClone[i][k] / matrixClone[k][k]
+			for j := n; j > -1; j-- {
+				matrixClone[i][j] = matrixClone[i][j] - (matrixClone[k][j] * K)
 			}
 		}
 	}
 
-	xx[n-1] = matrix[n-1][n]
-	for i = n - 2; i >= 0; i-- {
-		xx[i] = matrix[i][n]
-
-		if useParallel {
-			var wg sync.WaitGroup
-			for j = i + 1; j < n; j++ {
-				wg.Add(1)
-				j := j
-				go func() {
-					defer wg.Done()
-					xx[i] -= matrix[i][j] * xx[j]
-				}()
-			}
-			wg.Wait()
-		} else {
-			for j = i + 1; j < n; j++ {
-				xx[i] -= matrix[i][j] * xx[j]
-			}
+	if withAnswer {
+		for i := 0; i < n; i++ {
+			fmt.Printf("[%v] ", matrixClone[i][n])
 		}
 	}
 
-	for i = 0; i < len(xx); i++ {
-		fmt.Printf("[%v] ", xx[i])
-	}
 }
 
 func getChunk(total, routineNum, processesCount int) []int {
@@ -319,7 +200,26 @@ func getChunk(total, routineNum, processesCount int) []int {
 	return result
 }
 
+func generateMatrixInRAM(size int) {
+	if withDebug {
+		fmt.Println("Начало генерации матрицы в оперативную память")
+	}
+	matrixInRam = make([][]float64, size)
+	for i := 0; i < size; i++ {
+		matrixInRam[i] = make([]float64, size+1)
+		for j := 0; j < size+1; j++ {
+			matrixInRam[i][j] = float64(rand.Intn(20) - 10)
+		}
+	}
+	if withDebug {
+		fmt.Println("Матрица сгенерирована")
+	}
+}
+
 func generateMatrix(fileName string, size int) {
+	if withDebug {
+		fmt.Println("Начало генерации матрицы в файл")
+	}
 	err := os.Truncate(fileName, 0)
 	if err != nil {
 		panic(err)
@@ -337,6 +237,9 @@ func generateMatrix(fileName string, size int) {
 		if err != nil {
 			panic(err)
 		}
+	}
+	if withDebug {
+		fmt.Println("Матрица сгенерирована")
 	}
 }
 
@@ -356,6 +259,9 @@ func genLine(size int) string {
 }
 
 func loadData(fileName string) [][]float64 {
+	if withDebug {
+		fmt.Println("Начало закрузки матрицы")
+	}
 	file, err := os.Open(fileName)
 
 	if err != nil {
